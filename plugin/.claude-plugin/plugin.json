@@ -1,0 +1,14 @@
+{
+  "name": "screen-organ",
+  "version": "0.1.0",
+  "description": "Windows window-level visual perception for Claude Code: address windows by handle/title/process, capture quietly without stealing focus, and read text via OCR/UI Automation. Never fails silently.",
+  "author": {
+    "name": "zjj1280637679-ship-it",
+    "url": "https://github.com/zjj1280637679-ship-it"
+  },
+  "homepage": "https://github.com/zjj1280637679-ship-it/claude-screen-organ",
+  "repository": "https://github.com/zjj1280637679-ship-it/claude-screen-organ",
+  "license": "MIT",
+  "keywords": ["screenshot", "screen-capture", "windows", "ocr", "ui-automation", "vision"],
+  "mcpServers": "./.mcp.json"
+}

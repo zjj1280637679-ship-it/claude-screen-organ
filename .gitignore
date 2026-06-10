@@ -1,0 +1,6 @@
+.smoke/
+__pycache__/
+*.pyc
+.pytest_cache/
+captures/
+*.meta.json

@@ -1,10 +1,22 @@
 # claude-screen-organ
 
-**给 Claude Code 用的截图 / 外界信息插件——从一套 AI 工具论的第一性原理出发，设计、骨架与理论检验档案。**
+**给 Claude Code 用的 Windows 窗口级截图 / 文字提取插件——可装、可跑、已实测。**
 
-> 状态：**设计 + 理论档案阶段**。这里是完整的设计规范、待焊清单和理论来源，插件代码尚未实现（见 [插件骨架](插件骨架/)）。
+> 状态：**v0.1 可用**。工作插件在 [`plugin/`](plugin/)，已通过 `claude plugin validate` 并装入 Claude Code；
+> 21 项自动化测试 + 17 项真实窗口验收矩阵全过（见 [实测结果](文档/实测结果-v1.md)）。
+>
+> 安装：`claude plugin marketplace add <本仓库>` 然后 `claude plugin install screen-organ@claude-screen-organ`，
+> 依赖见 [plugin/README.md](plugin/README.md)。
 >
 > ⚠️ 与 `zjj1280637679-ship-it/screen-guardian`（给 **Codex** 的截图插件）**互不相关**，只是概念与名字撞了。本仓库是面向 **Claude Code** 的独立项目。
+
+---
+
+## 两条线
+
+1. **能动工的插件**（新增，2026-06）：[`plugin/`](plugin/) 工作代码 + [`文档/实现设计-v1.md`](文档/实现设计-v1.md) 实施契约 + [`文档/实测结果-v1.md`](文档/实测结果-v1.md)。
+   设计依据是对 8+ 成熟截图 MCP 项目（Peekaboo/snap-happy/Windows-MCP/Playwright MCP…）、Windows 捕获技术栈、以及姊妹项目 screen-guardian 的调研，加本机 T0 实测定档。
+2. **理论档案**（原有）：[`文档/设计规范-v2.md`](文档/设计规范-v2.md) 等是更早的「用插件检验一套 AI 工具论」的产物，作为来源归档；其结论是规范里最重的几层机制（ε_pool 预算、八字段授权件、判官状态机）在 Claude Code 实际能力下做不到，故 v1 实现只落地了其中能动工的约 15%（回执信封、黑帧合议、结构脱敏、授权映射到原生权限提示）。
 
 ---
 

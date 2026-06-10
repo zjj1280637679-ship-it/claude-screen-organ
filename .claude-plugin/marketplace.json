@@ -1,0 +1,15 @@
+{
+  "name": "claude-screen-organ",
+  "description": "Windows window-level screen perception plugin for Claude Code.",
+  "owner": {
+    "name": "zjj1280637679-ship-it",
+    "url": "https://github.com/zjj1280637679-ship-it"
+  },
+  "plugins": [
+    {
+      "name": "screen-organ",
+      "source": "./plugin",
+      "description": "Windows window-level visual perception for Claude Code: address windows by handle/title/process, capture quietly without stealing focus, and read text via OCR / UI Automation. Never fails silently."
+    }
+  ]
+}
