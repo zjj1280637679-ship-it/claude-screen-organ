@@ -1,0 +1,15 @@
+{
+  "name": "claude-screen-organ",
+  "description": "为 Claude Code 提供外界视觉/页面信息的有界器官：聚焦截图与结构提取，带权利关系门控（能力环+价值环双闸门）、最小泄露面默认、永不静默失败的回执信封。",
+  "version": "0.0.1-scaffold",
+  "author": {
+    "name": "zjj1280637679-ship-it"
+  },
+  "keywords": ["screenshot", "screen-capture", "external-information", "claude-code", "windows", "capability-security"],
+  "_status": "SCAFFOLD —— 仅占位。实现前须先焊掉《设计规范 v2》待焊清单中的 3 个致命矛盾。",
+  "_components": {
+    "mcpServers": ".mcp.json (TODO)：捕获后端，暴露 5 轴参数模型的 capture 工具，内嵌入口/有效性/安全三闸门与结构脱敏器",
+    "skills": "skills/ (TODO)：纤维审计——EMP4 式判别树，作为工具 schema 设计期评审清单",
+    "commands": "commands/ (TODO)：函级预设截图指令（shot.screen / shot.active / read.ocr / watch.appear ...）"
+  }
+}
