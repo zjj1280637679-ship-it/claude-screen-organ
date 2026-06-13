@@ -166,14 +166,22 @@ def capture_window(hwnd: int, mode: str = "quiet", allow_screen_crop: bool = Fal
         return None, rpt
 
     title = win32gui.GetWindowText(hwnd)
+    restored = False
     minimized = bool(win32gui.IsIconic(hwnd))
     if minimized:
         if restore_if_minimized:
             _restore_noactivate(hwnd)
+            restored = True
             minimized = bool(win32gui.IsIconic(hwnd))
         if minimized:
             rpt["verdict"] = "minimized"
-            rpt["warnings"].append("窗口已最小化，无有效像素；可设 restore_if_minimized=true")
+            rpt["silent_ok"] = True   # 没有干扰，只是静默下拿不到
+            rpt["capability_boundary"] = (
+                "窗口最小化无有效像素；静默约束下无法获取。授权 restore_if_minimized 可恢复"
+                "（SW_SHOWNOACTIVATE：会显形但不抢焦点）。")
+            rpt["warnings"].append("窗口已最小化，无有效像素。")
+            rpt["next_actions"] = [{"hint": "恢复后再取（窗口显形，不抢焦点）",
+                                    "params": {"restore_if_minimized": True}}]
             return None, rpt
 
     if delay_ms:
@@ -189,6 +197,7 @@ def capture_window(hwnd: int, mode: str = "quiet", allow_screen_crop: bool = Fal
     chromium = _is_chromium(title, hwnd)
     # PrintWindow/WGC 帧的像素原点 = GetWindowRect 左上（含阴影），裁剪/打码以此为基准
     pw_origin = tuple(win32gui.GetWindowRect(hwnd)[:2])
+    last_blank = None  # 直取拿到帧但判空白：区分"内容空白"与"完全拿不到"
 
     # ① PrintWindow(FULL) —— 窗口内容直取，与遮挡无关，带超时防挂起
     try:
@@ -198,9 +207,11 @@ def capture_window(hwnd: int, mode: str = "quiet", allow_screen_crop: bool = Fal
             rpt["attempts"].append({"method": "printwindow_full",
                                     "error": "timeout(窗口 UI 线程可能挂起)"})
         else:
-            ok, vd = _adopt(hwnd, img, pw_origin, "printwindow_full", rpt, chromium)
-            if ok:
-                return _finalize(img, pw_origin, rpt, vd)
+            status, vd = _adopt(hwnd, img, pw_origin, "printwindow_full", rpt, chromium)
+            if status == "ok":
+                return _finalize(img, pw_origin, rpt, vd, mode, restored)
+            if status == "blank":
+                last_blank = (img, pw_origin, "printwindow_full")
     except Exception as e:
         rpt["attempts"].append({"method": "printwindow_full", "error": str(e)[:160]})
 
@@ -221,15 +232,29 @@ def capture_window(hwnd: int, mode: str = "quiet", allow_screen_crop: bool = Fal
                         {"method": "wgc",
                          "error": f"几何不符 {img.size}!={exp}，疑似截到同名错窗，丢弃"})
                 else:
-                    ok, vd = _adopt(hwnd, img, pw_origin, "wgc", rpt, chromium)
-                    if ok:
-                        return _finalize(img, pw_origin, rpt, vd)
+                    status, vd = _adopt(hwnd, img, pw_origin, "wgc", rpt, chromium)
+                    if status == "ok":
+                        return _finalize(img, pw_origin, rpt, vd, mode, restored)
+                    if status == "blank":
+                        last_blank = (img, pw_origin, "wgc")
         except Exception as e:
             rpt["attempts"].append({"method": "wgc", "error": str(e)[:160]})
 
-    # ③ 直取失败 —— 默认不退化截屏、不抢焦点，把选择权交还调用方
+    # ③ 直取拿到帧但内容空白 —— 返回该帧 + blank_suspected（区分于完全拿不到）
+    if last_blank is not None:
+        bimg, borigin, bmethod = last_blank
+        rpt["method"] = bmethod
+        rpt["warnings"].append(
+            "直取拿到帧但内容疑似空白（加载中/未渲染）；delay_ms 或 wait_capture(until=stable) 后重试")
+        return _finalize(bimg, borigin, rpt, "blank_suspected", mode, restored)
+
+    # ④ 直取完全失败 —— 默认不退化截屏、不抢焦点，把选择权交还调用方
     if not allow_screen_crop:
         rpt["verdict"] = "background_unavailable"
+        rpt["silent_ok"] = True   # 没干扰，但静默下拿不到
+        rpt["capability_boundary"] = (
+            "直取(PrintWindow/WGC)未取到有效像素（受保护内容/特殊合成）。静默约束下无更优解："
+            "截屏需窗口可见、前台需抢焦点，二者都会突破静默。")
         rpt["warnings"].append(
             "窗口内容直取(PrintWindow/WGC)未取到有效像素，可能是受保护内容/特殊合成渲染。")
         rpt["next_actions"] = [
@@ -245,10 +270,14 @@ def capture_window(hwnd: int, mode: str = "quiet", allow_screen_crop: bool = Fal
     occ = wininfo.occlusion_probe(hwnd, rect)
     if occ["possibly_occluded"]:
         rpt["verdict"] = "screen_crop_occluded"
+        rpt["silent_ok"] = False   # 已在截屏路径（opt-in）
         rpt["occlusion"] = occ
+        rpt["capability_boundary"] = (
+            "屏幕裁剪会拍到上层窗口；要拿到该窗口本身需 mode=foreground 置前（抢焦点）。")
         rpt["warnings"].append(
             f"窗口被遮挡(match_ratio={occ['match_ratio']})，屏幕裁剪会拍到上层窗口；"
             "建议改用 mode=foreground。")
+        rpt["next_actions"] = [{"hint": "置前后截取（抢焦点）", "params": {"mode": "foreground"}}]
         return None, rpt
     try:
         img = _mss_crop(rect)
@@ -259,7 +288,7 @@ def capture_window(hwnd: int, mode: str = "quiet", allow_screen_crop: bool = Fal
         rpt["method"] = "screen_crop"
         rpt["verdict"] = "blank_suspected" if a["likely_blank"] else "ok"
         rpt["occlusion"] = occ
-        return _finalize(img, rect[:2], rpt, rpt["verdict"])
+        return _finalize(img, rect[:2], rpt, rpt["verdict"], mode, restored)
     except Exception as e:
         rpt["attempts"].append({"method": "screen_crop", "error": str(e)[:160]})
 
@@ -281,16 +310,17 @@ def _is_chromium(title: str, hwnd: int) -> bool:
 
 
 def _adopt(hwnd, img, pw_origin, method, rpt, chromium):
-    """直取帧的质量评估 + 采纳判定。返回 (是否采纳, verdict)。"""
+    """直取帧的质量评估 + 采纳判定。返回 ("ok"|"blank", verdict)。
+    "blank"=拿到帧但内容疑似空白；主循环暂存，直取链都空白时返回它 + blank_suspected。"""
     a = quality.assess_window_capture(hwnd, img, pw_origin)
     rpt["attempts"].append({"method": method, "quality": a})
     if a.get("client_crop_failed"):
         rpt["warnings"].append("客户区裁剪未生效，空白检测仅基于整图（标题栏内容可能掩盖空客户区）")
     if a["likely_blank"]:
-        rpt["warnings"].append(f"{method} 疑似空白/低信息，继续降级")
-        return False, None
+        rpt["warnings"].append(f"{method} 疑似空白/低信息，继续尝试其他后端")
+        return "blank", None
     rpt["method"] = method
-    return True, _direct_verdict(hwnd, rpt, chromium)
+    return "ok", _direct_verdict(hwnd, rpt, chromium)
 
 
 def _direct_verdict(hwnd, rpt, chromium: bool):
@@ -300,13 +330,26 @@ def _direct_verdict(hwnd, rpt, chromium: bool):
         occ = wininfo.occlusion_probe(hwnd, wininfo.get_window_rect(hwnd))
         if occ["possibly_occluded"]:
             rpt["occlusion"] = occ
+            rpt["capability_boundary"] = (
+                "被遮挡的 Chromium 窗口直取可能是渲染冻结的旧帧；要最新画面需 mode=foreground"
+                "（抢焦点，突破静默）。")
             rpt["warnings"].append(
                 "Chromium 系窗口被遮挡：可能是渲染冻结的旧帧，需要最新画面请 mode=foreground")
             return "frozen_frame_risk"
     return "ok"
 
 
-def _finalize(img, pixel_origin, rpt, verdict):
+def _finalize(img, pixel_origin, rpt, verdict, mode="quiet", restored=False):
     rpt["verdict"] = verdict
     rpt["pixel_origin"] = list(pixel_origin)   # 图像像素(0,0)对应的屏幕坐标，裁剪/打码基准
+    # 声明：此结果为达成是否突破了静默（不点不挪到表层）
+    intrusion = []
+    if mode == "foreground":
+        intrusion.append("foreground(抢焦点)")
+    if restored:
+        intrusion.append("restore(窗口显形)")
+    if rpt.get("method") == "screen_crop":
+        intrusion.append("screen_crop(屏幕截屏)")
+    rpt["intrusion_used"] = intrusion
+    rpt.setdefault("silent_ok", len(intrusion) == 0)
     return img, rpt
