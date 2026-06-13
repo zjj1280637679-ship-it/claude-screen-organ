@@ -124,18 +124,21 @@ def capture_screen(monitor: int = 0, region: list = None, max_edge: int = 1568,
 def capture_window(target: dict, mode: str = "quiet", max_edge: int = 1568,
                    format: str = "png", return_mode: str = "path",
                    mask_passwords: bool = False, acknowledge_sensitive: bool = False,
-                   allow_unverified_bbox: bool = False,
+                   allow_screen_crop: bool = False,
                    restore_if_minimized: bool = False, delay_ms: int = 0,
                    label: str = "window") -> list:
-    """截取单个窗口，默认安静模式（不激活、不置顶，不打扰用户）。
+    """获取目标窗口的干净图像——默认**后台内容直取**（PrintWindow→WGC），
+    哪怕窗口在后台、被完全遮挡都能拿到，且不激活/不抢焦点/不打扰你当前的操作。
     target: {"hwnd": 数字}精确 | {"title": "记事本"}标题子串 | {"process": "notepad.exe"}。
             多个窗口匹配时返回候选列表要求二选，不会乱截。
-    mode: quiet(默认,后台截,走 PrintWindow→WGC→裁屏降级链) | foreground(置前再截,最稳但抢焦点)。
-    敏感窗口（密码管理器/钱包/UAC）默认拒绝，需 acknowledge_sensitive=true 才截。
+    要点：直取从窗口自己的渲染面拿像素，与遮挡无关——"被遮挡"通常不是问题，不必抢焦点。
+    mode: quiet(默认,后台直取) | foreground(置前再取,会抢焦点,仅在确需最新前台画面时用)。
+    allow_screen_crop: 直取拿不到时(受保护内容/特殊渲染)才允许退化为屏幕裁剪；
+                       那是真截屏，被遮挡会拍到上层窗口，故默认关闭，由你显式开启。
+    敏感窗口（密码管理器/钱包/UAC）默认拒绝，需 acknowledge_sensitive=true。
     mask_passwords=true 用 UIA 找密码框打码（慢，opt-in）。
-    被遮挡窗口默认不裁屏（怕拍到上层窗口），需 allow_unverified_bbox=true。
-    返回回执含 verdict（ok/blank_suspected/occluded_risk/frozen_frame_risk/minimized/...）
-    和 next_actions 建议。永不静默返回错图。"""
+    verdict ∈ ok/blank_suspected/frozen_frame_risk/background_unavailable/
+              screen_crop_occluded/minimized；失败时 next_actions 给可复用的重试参数。永不静默返回错图。"""
     resolved = wininfo.resolve_target(target)
     if resolved.get("error"):
         return _envelope("寻址失败", {"ok": False, "verdict": "failed",
@@ -159,32 +162,33 @@ def capture_window(target: dict, mode: str = "quiet", max_edge: int = 1568,
                                "params": {"acknowledge_sensitive": True}}]})
 
     img, crpt = capture.capture_window(
-        hwnd, mode=mode, allow_unverified_bbox=allow_unverified_bbox,
+        hwnd, mode=mode, allow_screen_crop=allow_screen_crop,
         restore_if_minimized=restore_if_minimized, delay_ms=delay_ms)
 
     env = {"source": {"kind": "window", "hwnd": hwnd, "title": title,
                       "process": proc},
            "method": crpt.get("method"), "verdict": crpt.get("verdict"),
            "warnings": crpt.get("warnings", []),
-           "occlusion": crpt.get("occlusion"),
            "trust": "untrusted", "return_mode": return_mode}
+    if crpt.get("occlusion") is not None:   # 直取成功时通常不附（对直取是噪音）
+        env["occlusion"] = crpt["occlusion"]
     if sens["sensitive"]:
         env["sensitive_acknowledged"] = sens["reason"]
 
     if img is None:
         env["ok"] = False
-        env.setdefault("next_actions", [])
-        if crpt.get("verdict") == "occluded_risk":
-            env["next_actions"].append({"hint": "置前截取", "params": {"mode": "foreground"}})
-        elif crpt.get("verdict") == "minimized":
-            env["next_actions"].append({"hint": "先恢复再截",
+        # capture 引擎已按 verdict 备好可复用的 next_actions（含 allow_screen_crop / foreground）
+        env["next_actions"] = list(crpt.get("next_actions", []))
+        if crpt.get("verdict") == "minimized":
+            env["next_actions"].append({"hint": "先恢复再取",
                                         "params": {"restore_if_minimized": True}})
-        return _envelope(f"未能截取（{crpt.get('verdict')}）", env)
+        return _envelope(f"未能获取（{crpt.get('verdict')}）", env)
 
     masked = 0
     if mask_passwords:
         rects = privacy.find_password_rects(hwnd)
-        img, masked = privacy.mask_rects(img, crpt.get("window_rect", (0, 0)), rects)
+        # 打码基准必须用 img 实际后端的像素原点（PrintWindow/WGC=GetWindowRect，mss=DWM）
+        img, masked = privacy.mask_rects(img, crpt.get("pixel_origin", (0, 0)), rects)
     env["redaction"] = {"password_fields_masked": masked,
                         "denylist_hit": sens["reason"] if sens["sensitive"] else None}
 

@@ -36,7 +36,8 @@ def blank_metrics(img: Image.Image) -> dict:
 
 
 def client_area_crop(hwnd: int, window_img: Image.Image, window_rect: tuple):
-    """从窗口截图中裁出客户区。window_rect 是 GetWindowRect 的 (l,t,r,b)。"""
+    """从窗口截图中裁出客户区。window_rect[0:2] 必须与 window_img 像素(0,0) 对应的
+    屏幕坐标一致（PrintWindow/WGC→GetWindowRect 原点；mss→DWM 扩展边界原点）。"""
     try:
         cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
         sx, sy = win32gui.ClientToScreen(hwnd, (cl, ct))
@@ -55,11 +56,15 @@ def client_area_crop(hwnd: int, window_img: Image.Image, window_rect: tuple):
 
 
 def assess_window_capture(hwnd: int, img: Image.Image, window_rect: tuple) -> dict:
-    """整图 + 客户区双重检测。任何一层 likely_blank 即判可疑。"""
+    """整图 + 客户区双重检测。任何一层 likely_blank 即判可疑。
+    客户区裁剪失败时置 client_crop_failed=True——空白检测退化为只看整图（已知可被
+    标题栏内容骗过），调用方据此向回执追加 warning，不静默丢这道保护。"""
     whole = blank_metrics(img)
     client = None
     client_img = client_area_crop(hwnd, img, window_rect)
+    client_crop_failed = client_img is None
     if client_img is not None:
         client = blank_metrics(client_img)
     suspicious = whole["likely_blank"] or (client is not None and client["likely_blank"])
-    return {"whole": whole, "client": client, "likely_blank": bool(suspicious)}
+    return {"whole": whole, "client": client, "likely_blank": bool(suspicious),
+            "client_crop_failed": client_crop_failed}

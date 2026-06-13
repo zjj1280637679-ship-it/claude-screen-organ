@@ -1,12 +1,21 @@
 # -*- coding: utf-8 -*-
-"""捕获引擎与降级链。
+"""窗口内容获取引擎。
 
-T0 实测结论（Win10 19045 / GTX 750Ti）：
-- PrintWindow(PW_RENDERFULLCONTENT) 对前台 Chrome/Notepad/Electron 均出真内容（无黑帧）；
-  注意 PrintWindow(flags=0) 对 GPU 窗口会得白图（contrast 仍 35，但客户区是空的）→ 故只用 FULL。
-- windows-capture(WGC) 对后台窗口可出真内容，单帧 ~180-280ms；
-  本机 IsBorderRequired 不支持，draw_border 必须传 None（传 False 会抛异常）。
-- 降级链：PrintWindow(FULL) → 质量检测 → 不行则 WGC → 不行则 mss 裁屏+身份探针。
+设计立场（2026-06-13 修订）：用户说"截图"时，要的不是"屏幕截图"，而是
+**目标窗口的干净图像**——哪怕窗口在后台、被完全遮挡。所以本引擎默认走
+**窗口内容直取**：PrintWindow 与 WGC 直接从窗口自己的渲染表面拿像素，
+与窗口是否被遮挡、是否在前台**完全无关**，也不抢焦点、不干扰用户。
+
+只有降级链最末端的 mss 裁屏才是真"截屏"（从屏幕那块矩形抠图），它才会
+拍到上层窗口——因此它**默认禁用**，需 allow_screen_crop=true 显式开启，
+且自带遮挡身份门控。直取拿不到时不默认建议抢焦点（那会打断用户），而是
+诚实报 background_unavailable，把"退化截屏 / 前台截取"作为显式选项交还调用方。
+
+T0 实测（Win10 19045 / GTX 750Ti）：
+- PrintWindow(PW_RENDERFULLCONTENT) 对 Chrome/Notepad/Electron 出真内容；flags=0 对 GPU 窗口得白图故只用 FULL。
+- WGC 单帧 ~180-280ms；本机 IsBorderRequired 不支持，draw_border 必须传 None。
+- PrintWindow 与 WGC 帧尺寸均 = win32gui.GetWindowRect（含 DWM 阴影），故其像素原点是 GetWindowRect 左上，
+  与 mss 裁屏用的 DWM 扩展边界（排除阴影）不同——裁剪/打码必须按各后端的真实像素原点。
 """
 import ctypes
 import threading
@@ -20,6 +29,8 @@ from PIL import Image
 from . import quality, wininfo
 
 PW_RENDERFULLCONTENT = 0x00000002
+PRINTWINDOW_TIMEOUT = 2.0   # 挂起进程的 PrintWindow 会同步阻塞，超时即降级
+WGC_TIMEOUT = 7.0
 
 
 # ---------------- 全屏 / 区域 ----------------
@@ -64,7 +75,7 @@ def _printwindow(hwnd: int, flags: int) -> Image.Image:
         win32gui.ReleaseDC(hwnd, hwnd_dc)
 
 
-def _wgc(title: str, timeout: float = 6.0):
+def _wgc(title: str, timeout: float = WGC_TIMEOUT):
     from windows_capture import WindowsCapture
     result = {}
     done = threading.Event()
@@ -107,13 +118,46 @@ def _restore_noactivate(hwnd):
     time.sleep(0.15)
 
 
-def capture_window(hwnd: int, mode: str = "quiet", allow_unverified_bbox=False,
-                   restore_if_minimized=False, wait_stable=False,
-                   delay_ms: int = 0):
-    """返回 (PIL.Image|None, capture_report dict)。
+def _run_with_timeout(fn, timeout: float):
+    """在守护线程跑 fn，返回 (result, timed_out)。ctypes/SendMessage 阻塞无法强杀，
+    超时后线程随目标窗口恢复自然回收（daemon，不泄漏进程）。"""
+    box = {}
 
-    capture_report.verdict ∈ ok|blank_suspected|occluded_risk|identity_mismatch|
-                              frozen_frame_risk|minimized|failed
+    def worker():
+        try:
+            box["img"] = fn()
+        except Exception as e:  # noqa: BLE001 — 透传给主线程重抛
+            box["err"] = e
+
+    th = threading.Thread(target=worker, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        return None, True
+    if "err" in box:
+        raise box["err"]
+    return box.get("img"), False
+
+
+def _title_is_unique(hwnd: int, title: str) -> bool:
+    """WGC 只能按 window_name=title 选窗（不认 hwnd）。标题为空或非唯一时，
+    WGC 可能绑定到 OS 枚举序里第一个同名窗口而非目标——此时必须跳过 WGC。"""
+    if not title:
+        return False
+    same = [w for w in wininfo.list_windows(include_occlusion=False)
+            if w["title"] == title]
+    return len(same) <= 1
+
+
+def capture_window(hwnd: int, mode: str = "quiet", allow_screen_crop: bool = False,
+                   restore_if_minimized: bool = False, delay_ms: int = 0):
+    """获取单窗口的干净图像。默认后台直取（PrintWindow→WGC），不抢焦点、不退化截屏。
+
+    mode: quiet(默认,后台直取) | foreground(置前再取,会抢焦点,显式选择)
+    allow_screen_crop: 直取失败时允许退化为屏幕裁剪(本质是截屏,被遮挡会拍到上层窗口)
+    返回 (PIL.Image|None, capture_report)。verdict ∈
+      ok | blank_suspected | frozen_frame_risk | background_unavailable |
+      screen_crop_occluded | minimized | failed
     """
     rpt = {"method": None, "verdict": None, "warnings": [], "attempts": []}
     if not win32gui.IsWindow(hwnd):
@@ -142,57 +186,80 @@ def capture_window(hwnd: int, mode: str = "quiet", allow_unverified_bbox=False,
             rpt["warnings"].append("SetForegroundWindow 失败，可能因无输入焦点")
         time.sleep(0.25)
 
-    rect = wininfo.get_window_rect(hwnd)
-    occ = wininfo.occlusion_probe(hwnd, rect)
     chromium = _is_chromium(title, hwnd)
+    # PrintWindow/WGC 帧的像素原点 = GetWindowRect 左上（含阴影），裁剪/打码以此为基准
+    pw_origin = tuple(win32gui.GetWindowRect(hwnd)[:2])
 
-    # ① PrintWindow(FULL)
-    img = None
+    # ① PrintWindow(FULL) —— 窗口内容直取，与遮挡无关，带超时防挂起
     try:
-        img = _printwindow(hwnd, PW_RENDERFULLCONTENT)
-        a = quality.assess_window_capture(hwnd, img, rect)
-        rpt["attempts"].append({"method": "printwindow_full", "quality": a})
-        if not a["likely_blank"]:
-            rpt["method"] = "printwindow_full"
-            # PrintWindow 对 GDI 窗口即便被遮挡也取实时内容；冻结旧帧只是 Chromium 的隐患
-            rpt["verdict"] = _frozen_or_ok(occ, rpt, chromium)
-            return _finalize(img, rect, rpt, occ)
-        rpt["warnings"].append("PrintWindow 疑似空白/低信息，尝试 WGC")
+        img, timed_out = _run_with_timeout(
+            lambda: _printwindow(hwnd, PW_RENDERFULLCONTENT), PRINTWINDOW_TIMEOUT)
+        if timed_out:
+            rpt["attempts"].append({"method": "printwindow_full",
+                                    "error": "timeout(窗口 UI 线程可能挂起)"})
+        else:
+            ok, vd = _adopt(hwnd, img, pw_origin, "printwindow_full", rpt, chromium)
+            if ok:
+                return _finalize(img, pw_origin, rpt, vd)
     except Exception as e:
         rpt["attempts"].append({"method": "printwindow_full", "error": str(e)[:160]})
 
-    # ② WGC
-    try:
-        img = _wgc(title)
-        a = quality.assess_window_capture(hwnd, img, rect)
-        rpt["attempts"].append({"method": "wgc", "quality": a})
-        if not a["likely_blank"]:
-            rpt["method"] = "wgc"
-            rpt["verdict"] = _frozen_or_ok(occ, rpt, chromium)
-            return _finalize(img, rect, rpt, occ)
-        rpt["warnings"].append("WGC 也疑似空白")
-    except Exception as e:
-        rpt["attempts"].append({"method": "wgc", "error": str(e)[:160]})
+    # ② WGC —— 窗口内容直取；标题非唯一/空时无法按 hwnd 定位，跳过以免截错窗
+    if not _title_is_unique(hwnd, title):
+        rpt["attempts"].append({"method": "wgc",
+                                "skipped": "标题非唯一/为空，WGC 无法按 hwnd 定位，已跳过"})
+    else:
+        try:
+            img, timed_out = _run_with_timeout(lambda: _wgc(title), WGC_TIMEOUT + 0.5)
+            if timed_out:
+                rpt["attempts"].append({"method": "wgc", "error": "timeout"})
+            else:
+                gwr = win32gui.GetWindowRect(hwnd)
+                exp = (gwr[2] - gwr[0], gwr[3] - gwr[1])
+                if abs(img.width - exp[0]) > 8 or abs(img.height - exp[1]) > 8:
+                    rpt["attempts"].append(
+                        {"method": "wgc",
+                         "error": f"几何不符 {img.size}!={exp}，疑似截到同名错窗，丢弃"})
+                else:
+                    ok, vd = _adopt(hwnd, img, pw_origin, "wgc", rpt, chromium)
+                    if ok:
+                        return _finalize(img, pw_origin, rpt, vd)
+        except Exception as e:
+            rpt["attempts"].append({"method": "wgc", "error": str(e)[:160]})
 
-    # ③ mss 裁屏 + 身份探针
-    if occ["possibly_occluded"] and not allow_unverified_bbox:
-        rpt["method"] = None
-        rpt["verdict"] = "occluded_risk"
+    # ③ 直取失败 —— 默认不退化截屏、不抢焦点，把选择权交还调用方
+    if not allow_screen_crop:
+        rpt["verdict"] = "background_unavailable"
         rpt["warnings"].append(
-            f"窗口被遮挡(match_ratio={occ['match_ratio']})，裁屏会拍到上层窗口；"
-            "建议 mode=foreground，或确认后 allow_unverified_bbox=true")
+            "窗口内容直取(PrintWindow/WGC)未取到有效像素，可能是受保护内容/特殊合成渲染。")
+        rpt["next_actions"] = [
+            {"hint": "退化为屏幕裁剪（注意：这是截屏，窗口被遮挡时会拍到上层窗口）",
+             "params": {"allow_screen_crop": True}},
+            {"hint": "置前后再取（会抢焦点、打断你当前的操作）",
+             "params": {"mode": "foreground"}},
+        ]
+        return None, rpt
+
+    # ④ mss 裁屏 —— 显式 opt-in 的真截屏。贴近抓拍时刻复检遮挡（避免 probe→crop 竞态）
+    rect = wininfo.get_window_rect(hwnd)
+    occ = wininfo.occlusion_probe(hwnd, rect)
+    if occ["possibly_occluded"]:
+        rpt["verdict"] = "screen_crop_occluded"
+        rpt["occlusion"] = occ
+        rpt["warnings"].append(
+            f"窗口被遮挡(match_ratio={occ['match_ratio']})，屏幕裁剪会拍到上层窗口；"
+            "建议改用 mode=foreground。")
         return None, rpt
     try:
         img = _mss_crop(rect)
-        a = quality.assess_window_capture(hwnd, img, rect)
+        a = quality.assess_window_capture(hwnd, img, rect[:2])
         rpt["attempts"].append({"method": "screen_crop", "quality": a})
+        if a.get("client_crop_failed"):
+            rpt["warnings"].append("客户区裁剪未生效，空白检测仅基于整图（标题栏内容可能掩盖空客户区）")
         rpt["method"] = "screen_crop"
-        if not occ["possibly_occluded"]:
-            rpt["verdict"] = "blank_suspected" if a["likely_blank"] else "ok"
-        else:
-            rpt["verdict"] = "identity_mismatch"
-            rpt["warnings"].append("已按 allow_unverified_bbox 放行，但身份未验证")
-        return _finalize(img, rect, rpt, occ)
+        rpt["verdict"] = "blank_suspected" if a["likely_blank"] else "ok"
+        rpt["occlusion"] = occ
+        return _finalize(img, rect[:2], rpt, rpt["verdict"])
     except Exception as e:
         rpt["attempts"].append({"method": "screen_crop", "error": str(e)[:160]})
 
@@ -213,18 +280,33 @@ def _is_chromium(title: str, hwnd: int) -> bool:
     return any(h in blob for h in CHROMIUM_HINTS)
 
 
-def _frozen_or_ok(occ, rpt, chromium: bool):
-    # Chromium 被遮挡时因 occlusion 节流可能渲染冻结旧帧；GDI/原生窗口经 PrintWindow
-    # 取的是实时内容，遮挡不致旧帧——故只对 Chromium 系给冻结帧风险提示
-    if occ["possibly_occluded"] and chromium:
-        rpt["warnings"].append(
-            "Chromium 系窗口被遮挡：可能是渲染冻结的旧帧，"
-            "需要最新画面请 mode=foreground")
-        return "frozen_frame_risk"
+def _adopt(hwnd, img, pw_origin, method, rpt, chromium):
+    """直取帧的质量评估 + 采纳判定。返回 (是否采纳, verdict)。"""
+    a = quality.assess_window_capture(hwnd, img, pw_origin)
+    rpt["attempts"].append({"method": method, "quality": a})
+    if a.get("client_crop_failed"):
+        rpt["warnings"].append("客户区裁剪未生效，空白检测仅基于整图（标题栏内容可能掩盖空客户区）")
+    if a["likely_blank"]:
+        rpt["warnings"].append(f"{method} 疑似空白/低信息，继续降级")
+        return False, None
+    rpt["method"] = method
+    return True, _direct_verdict(hwnd, rpt, chromium)
+
+
+def _direct_verdict(hwnd, rpt, chromium: bool):
+    """直取成功的 verdict。GDI/原生窗口经 PrintWindow/WGC 取实时内容，遮挡无害故 ok；
+    只有 Chromium 系被遮挡时因 occlusion 节流可能是渲染冻结的旧帧——仅此情形才算 occlusion。"""
+    if chromium:
+        occ = wininfo.occlusion_probe(hwnd, wininfo.get_window_rect(hwnd))
+        if occ["possibly_occluded"]:
+            rpt["occlusion"] = occ
+            rpt["warnings"].append(
+                "Chromium 系窗口被遮挡：可能是渲染冻结的旧帧，需要最新画面请 mode=foreground")
+            return "frozen_frame_risk"
     return "ok"
 
 
-def _finalize(img, rect, rpt, occ):
-    rpt["occlusion"] = occ
-    rpt["window_rect"] = list(rect)
+def _finalize(img, pixel_origin, rpt, verdict):
+    rpt["verdict"] = verdict
+    rpt["pixel_origin"] = list(pixel_origin)   # 图像像素(0,0)对应的屏幕坐标，裁剪/打码基准
     return img, rpt

@@ -38,10 +38,15 @@ claude plugin install screen-organ@claude-screen-organ
 
 ## 用法要点
 
-1. **先 `list_windows` 再截**：拿到稳定的 `hwnd` 再 `capture_window({"hwnd": N})`。
+1. **先 `list_windows` 再取**：拿到稳定的 `hwnd` 再 `capture_window({"hwnd": N})`。
+   默认 `quiet` 是**后台内容直取**——从窗口自己的渲染面拿像素，后台/被完全遮挡的窗口
+   照样拿到干净 UI，不抢焦点。要的是干净的目标窗口，不是屏幕照片，所以"被遮挡"通常不是问题。
 2. **看回执的 `verdict`**：
    - `ok` 正常；`blank_suspected` 疑似空白（加 `delay_ms` 或 `wait_capture`）；
-   - `occluded_risk` 被遮挡（quiet 拒绝裁屏怕拍错窗口，改 `mode="foreground"`）；
+   - `background_unavailable` 直取拿不到（受保护/特殊渲染）；`next_actions` 给两个显式选项：
+     `allow_screen_crop=true`（退化为截屏，被遮挡会拍到上层窗口）或 `mode="foreground"`（抢焦点）——
+     两者都不默认推荐，按意图选；
+   - `screen_crop_occluded` 你开了 `allow_screen_crop` 但窗口被遮挡，截屏会拍到上层，已拒绝；
    - `frozen_frame_risk` 被遮挡的 Chromium 窗口可能是旧帧（要最新画面用 `mode="foreground"`）；
    - `minimized`（加 `restore_if_minimized=true`）；
    - `refused_sensitive` 命中敏感窗口黑名单（确需则 `acknowledge_sensitive=true`）。

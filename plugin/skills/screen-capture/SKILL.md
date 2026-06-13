@@ -27,8 +27,13 @@ receipt with `verdict`, `method`, and what was missed.
 ## Standard workflow
 
 1. **Locate**: `list_windows("chrome")` → pick the `hwnd` you want.
-2. **Capture**: `capture_window({"hwnd": 12345})`. Default `mode="quiet"` does NOT raise
-   the window — good, it won't interrupt the user.
+2. **Capture**: `capture_window({"hwnd": 12345})`. Default `mode="quiet"` is **background
+   direct-grab** — it pulls pixels from the window's own render surface (PrintWindow/WGC),
+   so it works on background AND fully-covered windows without raising or focusing them.
+   What the user wants is *the clean target window*, not a photo of the screen — "occluded"
+   is usually NOT a problem here; do not reach for `mode="foreground"` reflexively (it steals
+   focus and interrupts their work). Only the last-resort screen crop (opt-in via
+   `allow_screen_crop`) is a real screenshot that can catch the upper window.
 3. **Read the image**: the receipt's `return_mode` defaults to `path`. Open the returned
    `file.path` with the **Read** tool to actually see the screenshot (this routes through
    Claude Code's own image pipeline and is the most context-efficient path). Pass
@@ -41,10 +46,13 @@ Check `verdict` before trusting the pixels:
 - `ok` — good capture, identity verified.
 - `blank_suspected` — image looks empty/low-information (loading screen, or a GPU window
   that didn't render). Try again with `delay_ms` or `wait_capture(until="stable")`.
-- `occluded_risk` — the window is covered by another window; quiet capture refused to crop
-  the screen because it would photograph the wrong window. Retry with `mode="foreground"`
-  (raises the window — interrupts the user, so prefer asking first) or, if you accept the
-  risk, `allow_unverified_bbox=true`.
+- `background_unavailable` — direct content grab (PrintWindow/WGC) got no valid pixels
+  (protected content / special rendering). The receipt's `next_actions` offers two explicit
+  opt-ins: `allow_screen_crop=true` (degrades to a real screenshot — photographs the upper
+  window if covered) or `mode="foreground"` (raises the window — interrupts the user).
+  Neither is auto-preferred; choose by the user's intent.
+- `screen_crop_occluded` — you opted into `allow_screen_crop` but the window is covered, so a
+  crop would photograph the upper window; refused. Use `mode="foreground"` for the live view.
 - `frozen_frame_risk` — a covered Chrome/Electron window may have returned a stale frame
   (engine-level occlusion throttling). For the current view, use `mode="foreground"`.
 - `minimized` — no pixels exist. Retry with `restore_if_minimized=true`.
