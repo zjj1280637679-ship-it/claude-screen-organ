@@ -89,11 +89,15 @@ def _node_brief(c, auto):
 
 
 def _walk(c, auto, depth, state):
-    """递归建树。返回节点 dict，或 None（被剪枝/超限）。"""
-    if state["nodes"] >= state["max_nodes"]:
+    """递归建树。返回节点 dict，或 None（被剪枝/超限）。
+
+    计数分两轴：visited=扫描量（受 max_nodes 约束、触发 truncated），
+    emitted=实际进树的节点数（回执 node_count 用它，杜绝虚高）。
+    """
+    if state["visited"] >= state["max_nodes"]:
         state["truncated"] = True
         return None
-    state["nodes"] += 1
+    state["visited"] += 1
     node = _node_brief(c, auto)
     if node.get("password"):
         state["password_nodes"] += 1
@@ -122,12 +126,18 @@ def _walk(c, auto, depth, state):
             t.replace("Control", "") for t in INTERACTIVE_TYPES
         } or node.get("password")
         if not keep and not children:
-            state["nodes"] -= 0  # 已计数；剪枝只影响输出
+            # 非交互叶子：扫描已计入 visited，但不进树，emitted 不计
             return None
         if not keep and node["role"] in {t.replace("Control", "") for t in _CONTAINER_TYPES} \
                 and not node.get("name"):
             # 无名纯容器：拍扁，子节点上提
-            return {"role": node["role"], "children": children} if len(children) > 1 else children[0]
+            if len(children) > 1:
+                # 仍产出一个容器壳节点，计入 emitted
+                state["emitted"] += 1
+                return {"role": node["role"], "children": children}
+            # 单子拍扁：本节点不进树，子节点已各自计过 emitted，不计
+            return children[0]
+    state["emitted"] += 1
     return node
 
 
@@ -150,7 +160,7 @@ def ui_tree(hwnd: int, max_depth: int = 12, max_nodes: int = 2000,
     深读轴：默认不滚动收集视口外内容，但如实标 has_offscreen_content；deep_read 为深读授权位。
     """
     import uiautomation as auto
-    state = {"nodes": 0, "max_nodes": max_nodes, "max_depth": max_depth,
+    state = {"visited": 0, "emitted": 0, "max_nodes": max_nodes, "max_depth": max_depth,
              "interactive_only": interactive_only, "truncated": False,
              "depth_clipped": False, "password_nodes": 0, "has_offscreen": False}
     with auto.UIAutomationInitializerInThread():
@@ -160,7 +170,8 @@ def ui_tree(hwnd: int, max_depth: int = 12, max_nodes: int = 2000,
         tree = _walk(win, auto, 0, state)
     result = {
         "tree": tree,
-        "node_count": state["nodes"],
+        "node_count": state["emitted"],   # 实际进树的节点数，与树一一对应，不虚高
+        "visited_nodes": state["visited"],  # 扫描量（剪枝/拍扁前），max_nodes 约束的就是它
         "password_nodes_stripped": state["password_nodes"],
         "truncated": state["truncated"],
         "depth_clipped": state["depth_clipped"],

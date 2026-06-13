@@ -34,6 +34,26 @@ def get_process_name(hwnd: int) -> str:
         return "?"
 
 
+def get_process_path(hwnd: int):
+    """返回窗口所属进程的 exe 全路径（不取 basename）。拿不到返回 None。
+
+    复用 get_process_name 的 OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)+
+    GetModuleFileNameEx，只是不裁成文件名——供文档路由按 exe 所在目录找文档。
+    UWP（ApplicationFrameHost）此处不穿透：穿透只解决"报哪个进程名"，
+    取全路径用于定位文档时拿宿主路径即可。
+    """
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        h = win32api.OpenProcess(
+            win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        try:
+            return win32process.GetModuleFileNameEx(h, 0)
+        finally:
+            h.close()
+    except Exception:
+        return None
+
+
 def _uwp_real_process(hwnd, host_pid):
     found = {}
 
