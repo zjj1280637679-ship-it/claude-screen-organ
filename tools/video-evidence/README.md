@@ -45,6 +45,11 @@ render 时 **TEMPLATE 冻结、只有 SLOTS 被覆盖** → 换掉角色仍保�
   镜头结构复现(黑室→户外对峙)、**新角色跨镜头一致无漂移**、Δ=0.1s 声画对齐。角色换了、结构保住了 = 理解。
 - 用法:`python video_synth.py <参考webvideo目录> --swap-character "新角色" [--swap-setting ..] [--i2v] [--no-generate]`
 - **三模块自洽闭环**:evidence(看见)→ synth(理解=因子化+换槽生成)→ evidence(给生成片评级)。
+- **比较型验证 `measure_gap(ref, gen)`**(`--gap-vs`):让豆包**直接检测 参考↔生成 的逐轴差距**——
+  证明"同结构不同角色"的**唯一严格方式**:不可替换(结构)轴差距应**小**、可替换(人物)轴差距应**大**。
+  **策略铁律:声称"相似/同结构"必须做比较型 diff,不能只孤立看生成片**——孤立验证会给假 PASS(它没东西可比)。
+  实测武士↔狐面女武士:character=major(换成✓),但 visual_style/shot_structure/lighting/camera=major → verdict=CHECK,
+  暴露生成保真度在不可替换轴上不足(Seedance 没完全兑现结构),而**这只有对比才测得出**(= P1 测量诚实用在自己的合成声称上)。
 
 ## 残差 / 下一步(审查已识别)
 - **live 帧序列录制器**:给 UI运行/Agent回放/前端调试用例(源是活屏幕,不是文件)——**唯一"从零"原语,属 screen-organ 感知核心(纯感知无模型)**,应加进 `plugin/` 而非这里。

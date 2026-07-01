@@ -18,7 +18,7 @@ import time
 import urllib.request
 
 import webvideo
-from video_evidence import vision  # 复用感知原语(调 doubao 视觉)
+from video_evidence import vision, _img, _chat  # 复用感知原语(调 doubao)
 
 GATEWAY = os.environ.get("ARK_GATEWAY", "http://127.0.0.1:8788")
 
@@ -110,6 +110,51 @@ def gen_video(prompt, ratio="16:9", dur=5, image_url=None, wait_s=360):
     raise RuntimeError(f"生成超时({wait_s}s),末态:{last}")
 
 
+# 差距轴(按可/不可替换分类):证明因子化在生成中成立 = 非替换轴差距小 ∧ 可替换轴差距大
+GAP_AXES = [
+    ("visual_style", "不可替换", "整体视觉风格/画质质感"),
+    ("lighting", "不可替换", "打光(光源/明暗/对比)"),
+    ("shot_structure", "不可替换", "镜头结构(几个镜头/景别/如何推进)"),
+    ("camera", "不可替换", "运镜/机位"),
+    ("pacing", "不可替换", "节奏/氛围"),
+    ("character", "可替换", "主体人物外观身份"),
+]
+
+
+def _keyframes(work_dir, k):
+    m = json.load(open(os.path.join(work_dir, "manifest.json"), encoding="utf-8"))
+    fs = [f["path"] for f in m.get("frames", [])]
+    if len(fs) <= k:
+        return fs
+    step = len(fs) / k
+    return [fs[min(len(fs) - 1, int(i * step))] for i in range(k)]
+
+
+def measure_gap(ref_dir, gen_dir, k=5):
+    """让 doubao **直接检测 参考↔生成 的差距**,按轴因子化(比较型/diff 证据)。
+    预期:不可替换(结构)轴 gap 小=结构复现;可替换(人物)轴 gap 大=换槽成功。
+    返回 {axes:{轴:{gap,note}}, struct_preserved, character_swapped, verdict}。"""
+    A, B = _keyframes(ref_dir, k), _keyframes(gen_dir, k)
+    axes_desc = "；".join(f"{a}({tag}:{d})" for a, tag, d in GAP_AXES)
+    q = (f"上面先是参考视频A的{len(A)}帧,再是生成视频B的{len(B)}帧。**逐轴判断 A 与 B 的差距**,"
+         "gap 取值 {same, minor, major}。轴:" + axes_desc + "。"
+         "严格只输出 JSON:{\"axes\":{\"<轴名>\":{\"gap\":\"same|minor|major\",\"note\":\"\"}}}")
+    content = ([{"type": "text", "text": "参考视频 A 的帧:"}] + [_img(p) for p in A]
+               + [{"type": "text", "text": "生成视频 B 的帧:"}] + [_img(p) for p in B]
+               + [{"type": "text", "text": q}])
+    txt, _ = _chat([{"role": "user", "content": content}], max_tokens=800)
+    s = txt[txt.find("{"): txt.rfind("}") + 1]
+    axes = json.loads(s).get("axes", {})
+    struct_ok = all(axes.get(a, {}).get("gap") in ("same", "minor")
+                    for a, tag, _ in GAP_AXES if tag == "不可替换")
+    char_swapped = axes.get("character", {}).get("gap") == "major"
+    verdict = ("PASS:结构复现(不可替换轴差距小)+ 人物换成(可替换轴差距大)=因子化成立"
+               if (struct_ok and char_swapped) else
+               "CHECK:非替换轴或人物轴差距不符预期,因子化可能未完全成立")
+    return {"axes": axes, "struct_preserved": struct_ok,
+            "character_swapped": char_swapped, "verdict": verdict}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ref", help="参考视频 webvideo 产出目录(含 manifest.json)")
@@ -118,7 +163,13 @@ def main():
     ap.add_argument("--i2v", action="store_true", help="先 Seedream 出新角色图再 I2V")
     ap.add_argument("--out", default="synth_out")
     ap.add_argument("--no-generate", action="store_true", help="只出模板+prompt,不真生成")
+    ap.add_argument("--gap-vs", default=None,
+                    help="给一个生成视频目录 → 让豆包直接检测 参考↔生成 逐轴差距(比较型验证因子化)")
     a = ap.parse_args()
+
+    if a.gap_vs:
+        print(json.dumps(measure_gap(a.ref, a.gap_vs), ensure_ascii=False, indent=1))
+        return
 
     tpl = extract_template(a.ref)
     print("=== TEMPLATE(因子化:不可替换 vs 可替换)===")
