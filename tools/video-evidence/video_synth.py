@@ -134,15 +134,11 @@ def measure_gap(ref_dir, gen_dir, k=5):
     """让 doubao **直接检测 参考↔生成 的差距**,按轴因子化(比较型/diff 证据)。
     预期:不可替换(结构)轴 gap 小=结构复现;可替换(人物)轴 gap 大=换槽成功。
     返回 {axes:{轴:{gap,note}}, struct_preserved, character_swapped, verdict}。"""
-    A, B = _keyframes(ref_dir, k), _keyframes(gen_dir, k)
+    from video_evidence import perceive_joint  # 差距 = 视觉孪生的一种跨视频关系查询(联合感知)
     axes_desc = "；".join(f"{a}({tag}:{d})" for a, tag, d in GAP_AXES)
-    q = (f"上面先是参考视频A的{len(A)}帧,再是生成视频B的{len(B)}帧。**逐轴判断 A 与 B 的差距**,"
-         "gap 取值 {same, minor, major}。轴:" + axes_desc + "。"
-         "严格只输出 JSON:{\"axes\":{\"<轴名>\":{\"gap\":\"same|minor|major\",\"note\":\"\"}}}")
-    content = ([{"type": "text", "text": "参考视频 A 的帧:"}] + [_img(p) for p in A]
-               + [{"type": "text", "text": "生成视频 B 的帧:"}] + [_img(p) for p in B]
-               + [{"type": "text", "text": q}])
-    txt, _ = _chat([{"role": "user", "content": content}], max_tokens=800)
+    q = ("**逐轴判断 参考视频A 与 生成视频B 的差距**,gap∈{same,minor,major}。轴:" + axes_desc
+         + "。严格只输出 JSON:{\"axes\":{\"<轴名>\":{\"gap\":\"same|minor|major\",\"note\":\"\"}}}")
+    txt, _ = perceive_joint([ref_dir, gen_dir], q, k_per_video=k, labels=["参考视频A", "生成视频B"])
     s = txt[txt.find("{"): txt.rfind("}") + 1]
     axes = json.loads(s).get("axes", {})
     struct_ok = all(axes.get(a, {}).get("gap") in ("same", "minor")

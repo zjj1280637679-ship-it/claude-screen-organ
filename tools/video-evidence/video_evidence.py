@@ -46,6 +46,30 @@ def vision(frame_paths, prompt, max_tokens=400):
     return _chat([{"role": "user", "content": content}], max_tokens=max_tokens)
 
 
+def _keyframes_of(work_dir, k=5):
+    m = json.load(open(os.path.join(work_dir, "manifest.json"), encoding="utf-8"))
+    fs = [f["path"] for f in m.get("frames", [])]
+    if len(fs) <= k:
+        return fs
+    step = len(fs) / k
+    return [fs[min(len(fs) - 1, int(i * step))] for i in range(k)]
+
+
+def perceive_joint(videos, question, k_per_video=5, labels=None, max_tokens=800):
+    """**视觉孪生**:把 N 段相关视频的关键帧**一起**喂转述模型(单次上下文),让它感知**跨视频关系**
+    (差距/对应/因果/连续/多角度)——这些关系**只存在于联合视图**,分开转述会把它们投影掉、丢失
+    (= 丢 I(A;B|联合) 关系互信息)。跟音视频 SYNC 同构:关系活在联合视图,单流感知是杀死关系的投影。
+    videos=[work_dir 或 [frame_paths]]。**诚实约束**:每段采 k_per_video 关键帧(token 限),采样覆盖=关系可测的边界。"""
+    labels = labels or [f"视频{chr(65 + i)}" for i in range(len(videos))]
+    content = []
+    for lab, v in zip(labels, videos):
+        frames = v if isinstance(v, list) else _keyframes_of(v, k_per_video)
+        content.append({"type": "text", "text": f"{lab} 的关键帧:"})
+        content += [_img(p) for p in frames]
+    content.append({"type": "text", "text": question})
+    return _chat([{"role": "user", "content": content}], max_tokens=max_tokens)
+
+
 # ============ 确定性测量(无模型 → verified=true) ============
 def audio_envelope(wav, win_s=0.1):
     """16k mono wav → [(t, rms)] 能量包络。纯测量。无 wav/audioop → None。"""
@@ -301,7 +325,18 @@ def main():
     ap.add_argument("src", help="webvideo 产出目录(含 manifest.json)或视频文件/URL")
     ap.add_argument("--task", default="video-gen-eval")
     ap.add_argument("--max-steps", type=int, default=14)
+    ap.add_argument("--relate", default=None,
+                    help="视觉孪生:跨视频关系查询(联合感知 src + --also 的所有相关视频,单次上下文)")
+    ap.add_argument("--also", action="append", default=None,
+                    help="参与联合感知的其它视频目录(可重复)——高语境多视频事件让模型一次看全")
     a = ap.parse_args()
+
+    if a.relate:
+        dirs = [a.src] + (a.also or [])
+        txt, mdl = perceive_joint(dirs, a.relate)
+        print(json.dumps({"videos": dirs, "question": a.relate, "model": mdl,
+                          "joint_answer": txt}, ensure_ascii=False, indent=1))
+        return
 
     work = a.src
     if not os.path.isdir(work) or not os.path.isfile(os.path.join(work, "manifest.json")):
