@@ -178,6 +178,19 @@ def clip(video, out_path, t0, t1):
     raise RuntimeError(f"切子片失败:{(se or '')[-400:]}")
 
 
+def detect_shots(video, threshold=0.3):
+    """启发式检测剪辑切点(场景切换)。ffmpeg scene 滤镜 → [切点秒]。无模型。
+    threshold 越低越敏感;**单阈值天生会漏暗场/渐变切点**(如暗室→户外的低分切换),故调用方应把它当 best-effort、
+    别据它硬断言镜头数(见 video_evidence:'剪辑不算缺陷'由问题措辞兜底,不依赖此计数)。失败/无切点 → []。"""
+    import re
+    _, _, se = _run(["ffmpeg", "-i", video, "-vf",
+                     f"select='gt(scene,{threshold})',showinfo", "-f", "null", "-"])
+    cuts = sorted({round(float(m.group(1)), 2)
+                   for m in re.finditer(r"pts_time:([\d.]+)", se or "")
+                   if float(m.group(1)) > 0.2})
+    return cuts
+
+
 def extract_audio(video, out_dir):
     """抽 16k mono wav(ASR 就绪)。无音轨/失败 → None,上层据 has_audio 招认。"""
     audio = os.path.join(out_dir, "audio.wav")

@@ -121,9 +121,11 @@ def disconfirm_visual(frame_paths, claim):
 QUESTIONS = {
     "video-gen-eval": [
         {"id": "cam_motion", "ch": "visual", "kind": "causality", "cost": "high",
-         "q": "整段镜头运动是否平滑连续(有无跳变/扭曲/瞬移)?"},
+         "q": "**同一镜头内部**运动是否平滑(有无跳变/扭曲/瞬移)?剪辑切镜属正常,不算跳变。"},
         {"id": "obj_consistency", "ch": "visual", "kind": "state", "cost": "high",
-         "q": "画面主体/地貌是否前后一致(有无形变、闪烁、凭空增减)?"},
+         "q": "**同一镜头内**画面主体/物体是否一致(有无形变、闪烁、凭空增减)?不同镜头的场景变化是正常剪辑,不算不一致。"},
+        {"id": "character_identity", "ch": "visual", "kind": "state", "cost": "high",
+         "q": "**跨越剪辑切点**,同一角色(面容/服饰/装备)是否前后可辨认为同一人(AI 视频常见的角色漂移)?"},
         {"id": "audio_presence", "ch": "audio", "kind": "state", "cost": "low",
          "q": "是否有真实音轨声音、响的时刻在哪?"},
         {"id": "av_sync", "ch": "sync", "kind": "sync", "cost": "med",
@@ -167,6 +169,20 @@ def analyze(work_dir, task="video-gen-eval", max_steps=14):
     aenv = audio_envelope(wav)
     afacts = audio_facts(aenv)
     menv = visual_motion(frames)
+
+    # 确定性检测剪辑切点:把"镜头内(生成质量)"与"跨镜头(剪辑=正常)"分开,别把剪辑当缺陷
+    try:
+        cuts = webvideo.detect_shots(video) if video else []
+    except Exception:
+        cuts = []
+    rep["shots"] = {"n": len(cuts) + 1, "cuts": cuts}
+    if video:
+        rep["evidence"].append(_ev("visual", "state", None,
+            f"启发式检测约 {len(cuts) + 1} 个镜头,切点 t≈{cuts}s(ffmpeg 场景阈值0.3;"
+            "暗场/渐变切点可能漏,best-effort——'剪辑不算缺陷'由问题措辞兜底、不依赖此计数)",
+            "shot_heuristic", verified=True))
+    cut_hint = ((f"(注:本视频检测到 {len(cuts)} 个剪辑切点 t≈{cuts}s,切镜=正常叙事剪辑,"
+                 "**请勿把剪辑切换本身当缺陷**,只按问题所指的范围找异常) ") if cuts else "")
 
     gaps = list(QUESTIONS[task])
     # rank = 未闭 gap 数;每轮闭一个 → 严格递减(P3);另有 max_steps 硬顶
@@ -217,14 +233,17 @@ def analyze(work_dir, task="video-gen-eval", max_steps=14):
             continue
 
         # ---------- 视觉断言:先粗看整段 → 有可疑区间才递归抽段复核(VoI/P2) → 反驳后 verified(P4) ----------
-        probe = (q + " 只看这几帧粗判。若发现可疑区间,请在末行输出 'SUSPECT:[t0,t1]'(秒);"
+        probe = (q + cut_hint + " 只看这几帧粗判。若发现可疑区间,请在末行输出 'SUSPECT:[t0,t1]'(秒);"
                  "若整体正常,末行输出 'CLEAR'。")
         txt, mdl = vision(all_paths, probe, max_tokens=300)
         step("vision-probe", f"{qid}: {txt[:90]}")
         suspect = _parse_suspect(txt)
 
-        claim_pos = {"cam_motion": "镜头运动平滑连续、无跳变/扭曲",
-                     "obj_consistency": "画面主体/地貌前后一致、无形变或闪烁"}[qid]
+        claim_pos = {
+            "cam_motion": "在每个镜头内部运动平滑连续、无跳变/扭曲(剪辑切镜属正常、不算跳变)",
+            "obj_consistency": "在同一镜头内画面主体/物体一致、无形变或闪烁(不同镜头间的场景变化是正常剪辑、不算不一致)",
+            "character_identity": "跨越剪辑切点,同一角色的面容/服饰/装备前后可辨认为同一人",
+        }[qid]
 
         if suspect and video and steps[0] < max_steps - 1:
             # 递归:抽可疑子段、密集采帧(先抽段理解过程,再抽帧复核) → 对该段跑反驳
